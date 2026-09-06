@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor/OS junk
+*.swp
+Thumbs.db
+
+# Internal, not for the public repo
+syndication-kit.md
