@@ -7,6 +7,7 @@
 - Getting a *reasoning* LLM (`gpt-oss:20b`) to extract entities at a usable speed took real tuning — the default configuration was roughly **10x too slow** to be practical. The fix (`OLLAMA_LLM_THINK=low`) is the single most important lesson in this document.
 - LightRAG has **no official MCP server**. Every community wrapper we tried (including the most-used one on PyPI) fell behind LightRAG's REST API within months of being published and started failing silently. We ended up writing a ~110-line MCP server ourselves, run as its own `launchd` daemon, exposed over Tailscale exactly like everything else in this stack.
 - Two more non-obvious bugs along the way: an SDK version mismatch (`mcp` 1.x vs 2.x, same category of breaking change that also broke the community wrapper) and the MCP SDK's own DNS-rebinding protection rejecting requests proxied through `tailscale serve`.
+- The custom server ships in **two versions** ([`mcp-servers/lightrag-mcp/`](mcp-servers/lightrag-mcp) in this repo): [`simple/`](mcp-servers/lightrag-mcp/simple) (`stdio`, no auth, for Claude Desktop on a tailnet-joined machine) and [`remote/`](mcp-servers/lightrag-mcp/remote) (`streamable-http` with a static-token auth check, meant to sit behind Tailscale Funnel and be registered as a Custom Connector on claude.ai — see Part 3.8).
 
 ## Architecture
 
@@ -25,14 +26,18 @@ flowchart LR
         lightrag --- serve1
         mcp --- serve2
         laptop["MacBook Pro\nClaude Desktop"]
-        phone["Phone\nTailscale app"]
         serve1 -.-> laptop
         serve2 -->|mcp-remote bridge| laptop
-        serve2 -.-> phone
     end
+    funnel["tailscale funnel\n:443 -> 8500\n(public, token-checked)"]
+    mcp --- funnel
+    phone["Claude mobile app"]
+    connector["Custom Connector\non claude.ai"]
+    funnel -->|x-auth-token| connector
+    connector -.-> phone
 ```
 
-LightRAG and the MCP server are two independent daemons on the Mac mini, each exposed on its own Tailscale-only HTTPS port — the same pattern already used for Ollama and OpenCode in Part 1. Neither is reachable from the public internet; both require a device to be on the tailnet.
+LightRAG and the MCP server are two independent daemons on the Mac mini, each exposed over Tailscale — the same pattern already used for Ollama and OpenCode in Part 1. LightRAG itself stays tailnet-only. The MCP server is additionally exposed **publicly** via `tailscale funnel` (Part 3.8), protected by its own static-token check, so it can be reached by the Claude mobile app and registered as a Custom Connector on claude.ai — the [`simple/`](mcp-servers/lightrag-mcp/simple) version is used instead for tailnet-only Claude Desktop access, with no auth to manage.
 
 ## Table of contents
 
@@ -43,6 +48,7 @@ LightRAG and the MCP server are two independent daemons on the Mac mini, each ex
 - [Part 3.5 — Ingestion and retrieval](#part-35--ingestion-and-retrieval)
 - [Part 3.6 — MCP access: why the community wrapper doesn't work, and the server we wrote instead](#part-36--mcp-access-why-the-community-wrapper-doesnt-work-and-the-server-we-wrote-instead)
 - [Part 3.7 — Connecting Claude Desktop over Tailscale](#part-37--connecting-claude-desktop-over-tailscale)
+- [Part 3.8 — Going public: auth, Tailscale Funnel, and a Custom Connector on claude.ai](#part-38--going-public-auth-tailscale-funnel-and-a-custom-connector-on-claudeai)
 - [Operational notes](#operational-notes)
 - [Uninstalling everything](#uninstalling-everything)
 - [Sources](#sources)
@@ -289,13 +295,56 @@ The workaround is the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) b
 }
 ```
 
-This keeps the whole system tailnet-private end to end — no public exposure, no OAuth, authentication is Tailscale's device identity plus LightRAG's own API key (forwarded internally by the MCP server, not by the client). The trade-off: it only works from devices already on the tailnet, and every client machine needs Node/`npx` available. Going fully public later (Tailscale Funnel + a Custom Connector registered on claude.ai, for phone access away from the tailnet) is a deliberate future step, not done here — it requires adding the MCP server's own authentication layer first, since a publicly reachable server has no other gate in front of it besides whatever the server itself checks.
+This keeps the whole system tailnet-private end to end — no public exposure, no OAuth, authentication is Tailscale's device identity plus LightRAG's own API key (forwarded internally by the MCP server, not by the client). The trade-off: it only works from devices already on the tailnet, and every client machine needs Node/`npx` available. This is the [`simple/`](mcp-servers/lightrag-mcp/simple) server — use it if tailnet-only access is enough for you.
+
+## Part 3.8 — Going public: auth, Tailscale Funnel, and a Custom Connector on claude.ai
+
+The Claude mobile app, and a Custom Connector registered on claude.ai generally, don't reach a tailnet-private endpoint at all — they fetch through Anthropic's own infrastructure, which has no route into your tailnet. Reaching them means exposing the MCP server on the public internet, which in turn means it needs its own authentication — the Tailscale network boundary that was the only gate so far disappears once the endpoint is public. This is what the [`remote/`](mcp-servers/lightrag-mcp/remote) server adds on top of everything in Part 3.6.
+
+**Authentication.** The MCP Python SDK does have a built-in auth mechanism (`token_verifier`/`AuthSettings` on `FastMCP`), but it's built for a real OAuth authorization server — it requires an `issuer_url` and expects a full OAuth flow, which is a lot of machinery for a single-user server with one static secret. Instead, `remote/server.py` gets the raw ASGI app via `mcp.streamable_http_app()` (skipping `mcp.run()` entirely) and wraps it in a small Starlette middleware that checks a static token:
+
+```python
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        provided = request.headers.get("x-auth-token", "").strip()
+        if not provided:
+            auth_header = request.headers.get("authorization", "")
+            if auth_header.lower().startswith("bearer "):
+                provided = auth_header[7:].strip()
+        if not provided or not secrets.compare_digest(provided, MCP_AUTH_TOKEN):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+app = mcp.streamable_http_app()
+app.add_middleware(TokenAuthMiddleware)
+uvicorn.run(app, host="127.0.0.1", port=MCP_HTTP_PORT)
+```
+
+Two headers are accepted on purpose. `Authorization` is what a generic MCP client (`mcp-remote`, `curl`) would naturally use — but claude.ai's own Custom Connector setup UI reserves that header for its own OAuth bearer token and doesn't let you set it manually, offering a small set of custom header names instead. `x-auth-token` is one of those, so the server checks it first and falls back to `Authorization: Bearer` for everything else.
+
+**Tailscale Funnel, and a port gotcha.** `tailscale serve` (Part 3.4/3.6) is tailnet-only by design; `tailscale funnel` is the equivalent for public exposure:
+
+```bash
+sudo tailscale funnel --bg --https=443 8500
+```
+
+> **Gotcha:** Tailscale Funnel only routes **ports 443, 8443, and 10000** to the public internet. The CLI happily accepts `--https=8446` (the port already used for `tailscale serve` in Part 3.6) and reports it as "Available on the internet" — but it simply isn't reachable from outside the tailnet on that port. Worse, even switching to 10000 (a Funnel-supported port) still failed specifically in claude.ai's Custom Connector reachability check ("Couldn't reach this address"), while working fine for direct `curl` — suggesting that infrastructure only egresses to port 443. **443 is the port that actually worked end to end.**
+
+**A second DNS-rebinding-protection wrinkle.** With `MCP_ALLOWED_HOSTS` set to a bare hostname (no port) and the server on port 443, the naive way to build the SDK's `allowed_hosts` list (turning a bare host into a `host:*` wildcard pattern) doesn't match — the SDK's own matcher requires a literal `:` for the wildcard form, but a `Host` header omits the port entirely when it's the scheme's default (443 for HTTPS). The result was the same `421 Invalid Host header` from Part 3.6, but on the *correct* hostname this time. Fix: add both the bare hostname and the `:*` wildcard form to `allowed_hosts` (see `remote/server.py` — this is why it treats a portless `MCP_ALLOWED_HOSTS` entry specially rather than just appending `:*`).
+
+**Registering the Custom Connector**, once the server answers `401`/`200` correctly over the public URL:
+
+1. claude.ai → Settings → Connectors → Add custom connector.
+2. URL: `https://<mac-mini>.<tailnet>.ts.net/mcp` (port 443, so it's omitted from the URL).
+3. Request headers → add `x-auth-token` with the server's `MCP_AUTH_TOKEN` as the value.
+
+No OAuth client setup is needed on the connector side despite the UI presenting OAuth-client options — the server doesn't implement OAuth at all, and the header-based token is what actually authenticates the connection.
 
 ## Operational notes
 
 - LightRAG's LLM response cache (Part 3.3) survives restarts; wipe it (`storage/kv_store_llm_response_cache.json`, or the whole `storage/` directory) before any timing comparison, not just a content comparison.
 - `~/ai-memory/raw/` is the only thing that isn't recomputable — back it up like any other personal data; `lightrag/storage` and the MCP server's own state are both safe to delete and rebuild.
-- The MCP server currently has no authentication of its own beyond the Tailscale network boundary — acceptable for tailnet-private use, not sufficient if it's ever put behind a public Funnel.
+- The [`simple/`](mcp-servers/lightrag-mcp/simple) server has no authentication of its own beyond the Tailscale network boundary — fine for tailnet-private `stdio` use, never expose it publicly as-is. The [`remote/`](mcp-servers/lightrag-mcp/remote) server (Part 3.8) adds a static-token check specifically so it's safe behind a public Funnel.
 
 ## Uninstalling everything
 
@@ -303,7 +352,8 @@ In reverse dependency order:
 
 ```bash
 # MCP server
-tailscale serve --https=8446 off
+sudo tailscale funnel --https=443 off   # if using remote/ + Funnel (Part 3.8)
+tailscale serve --https=8446 off        # if using simple/ + tailscale serve (Part 3.6)
 sudo launchctl bootout system/ai.lightrag.mcp
 sudo rm /Library/LaunchDaemons/ai.lightrag.mcp.plist
 sudo rm /var/log/lightrag-mcp*.log
@@ -335,3 +385,5 @@ On the client side, remove the `lightrag-knowledge-base` entry from `claude_desk
 - [Tailscale blog — Making an MCP server more robust, and much more private](https://tailscale.com/blog/model-for-mcp-connectivity-lee-briggs) — confirms tailnet-private endpoints aren't reachable by claude.ai's own remote-MCP infrastructure
 - [modelcontextprotocol/python-sdk issue #1798 — resolving 421 Invalid Host Header](https://github.com/modelcontextprotocol/python-sdk/issues/1798) — the DNS-rebinding-protection fix used in Part 3.6
 - [mcp-remote on npm](https://www.npmjs.com/package/mcp-remote) — stdio-to-HTTP bridge used in Part 3.7
+- [Tailscale — `tailscale funnel` reference](https://tailscale.com/kb/1311/tailscale-funnel) — confirms Funnel only routes ports 443, 8443, and 10000 publicly (Part 3.8)
+- [tailscale/tailscale issue #14625 — Funnel TCP behavior differs between 443/8443/10000 and other ports](https://github.com/tailscale/tailscale/issues/14625) — corroborates the port restriction found empirically in Part 3.8

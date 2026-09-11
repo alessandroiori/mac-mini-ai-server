@@ -1,27 +1,25 @@
 """
-lightrag-mcp — minimal, self-maintained MCP server for a personal LightRAG
-knowledge base. A thin proxy over LightRAG's REST API, exposing only the
-tools this project actually needs (query, list, upload, note, health,
-scan) — no entity/relation graph-editing tools, on purpose.
+lightrag-mcp (simple) — minimal MCP server for a personal LightRAG knowledge
+base, meant to run as a local `stdio` subprocess of Claude Desktop (or any
+other MCP client that spawns local processes). No authentication, no public
+exposure — it talks to LightRAG over the network you already trust (loopback,
+or a private tailnet), the same way Claude Desktop already talks to it.
 
-Why this exists instead of an off-the-shelf MCP wrapper: see
+Use this version if: you only ever use Claude Desktop on a machine that's
+already on the same network/tailnet as LightRAG, and you don't need the
+mobile app or a Custom Connector on claude.ai to reach it.
+
+For a version that's safe to expose publicly (Tailscale Funnel + Custom
+Connector on claude.ai), see ../remote/server.py instead — it adds a static
+bearer-token check and runs as a standalone streamable-http service rather
+than a client subprocess.
+
+Why this exists instead of an off-the-shelf MCP wrapper for LightRAG: see
 docs/03-lightrag-mcp-memory.md, Part 3.6 in this repo.
 
 Required env vars:
   LIGHTRAG_BASE_URL     LightRAG's own REST endpoint, e.g. http://127.0.0.1:9621
-                        (co-located with LightRAG, so plain loopback is fine)
   LIGHTRAG_API_KEY      same key as LightRAG's own .env
-
-Optional env vars:
-  MCP_TRANSPORT         "stdio" (default) or "streamable-http"
-  MCP_HTTP_PORT         port for streamable-http (default 8500), bound to 127.0.0.1
-                        — external exposure is `tailscale serve`'s job, not this script
-  MCP_ALLOWED_HOSTS     comma-separated extra Host-header values to accept, on top of
-                        127.0.0.1/localhost — needed when the server sits behind
-                        `tailscale serve` or any reverse proxy, since the MCP SDK's
-                        DNS-rebinding protection otherwise rejects the proxied Host
-                        header (see docs/03-lightrag-mcp-memory.md, Part 3.6).
-                        Example: "mymachine.tailxxxxx.ts.net:8446"
 """
 
 import os
@@ -29,32 +27,16 @@ from datetime import datetime, timezone
 
 import httpx
 from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
 
 LIGHTRAG_BASE_URL = os.environ.get("LIGHTRAG_BASE_URL", "http://127.0.0.1:9621")
 LIGHTRAG_API_KEY = os.environ.get("LIGHTRAG_API_KEY", "")
-MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
-MCP_HTTP_PORT = int(os.environ.get("MCP_HTTP_PORT", "8500"))
 
 if not LIGHTRAG_API_KEY:
     raise RuntimeError("LIGHTRAG_API_KEY is not set — required to talk to LightRAG")
 
 HEADERS = {"X-API-Key": LIGHTRAG_API_KEY}
 
-_extra_hosts = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-_allowed_hosts = ["127.0.0.1:*", "localhost:*"] + [h if ":" in h else f"{h}:*" for h in _extra_hosts]
-_allowed_origins = ["http://127.0.0.1:*"] + [f"https://{h.split(':')[0]}:*" for h in _extra_hosts]
-
-mcp = FastMCP(
-    "lightrag-knowledge-base",
-    host="127.0.0.1",
-    port=MCP_HTTP_PORT,
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=_allowed_hosts,
-        allowed_origins=_allowed_origins,
-    ),
-)
+mcp = FastMCP("lightrag-knowledge-base")
 
 
 def _client() -> httpx.Client:
@@ -146,4 +128,4 @@ def scan_for_new_documents() -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport=MCP_TRANSPORT)
+    mcp.run(transport="stdio")
