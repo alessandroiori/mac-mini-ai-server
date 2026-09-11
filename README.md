@@ -31,7 +31,7 @@ The Mac mini is the always-on hub: OpenCode runs there as the orchestrator, call
 
 1. **[Ollama + OpenCode + Tailscale — the always-on local AI server](docs/01-ollama-opencode-tailscale.md)** — the base layer: local model serving, multi-machine config sync, `launchd` persistence, Tailscale exposure, network security checklist, maintenance.
 2. **MLX as a native alternative to Ollama** — *exploring, not started.* Evaluating Apple's own ML framework (built for unified memory) in place of Ollama, for potential RAM/throughput gains on Apple Silicon.
-3. **Memory/RAG layer (Cognee + LightRAG)** — *in progress.* Adding long-term memory on top of the same Mac mini, exposed the same way over Tailscale. Guide coming once implemented.
+3. **[LightRAG + a custom MCP server — long-term memory](docs/03-lightrag-mcp-memory.md)** — a personal knowledge base (documents, notes) on top of the same Mac mini, queried via MCP, exposed the same way over Tailscale.
 
 ## Requirements (common to all guides here)
 
