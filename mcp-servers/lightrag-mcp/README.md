@@ -14,7 +14,7 @@ Two versions, pick the one that matches how you'll use it:
 | Use case | Claude Desktop on a machine already on the same network/tailnet as LightRAG | Claude mobile app, a Custom Connector on claude.ai — anything that can't reach a tailnet-private endpoint |
 | Extra dependency | none beyond `mcp`/`httpx` | `uvicorn` |
 
-Both expose the same read-mostly tool set. Deliberately **not** exposed in either: entity/relation creation, editing, merging, or deletion. A personal knowledge base has no real use for graph-editing tools, and they're pure attack surface if this server is ever exposed beyond a private network.
+Both expose the same tool set. Deliberately **not** exposed in either: entity/relation creation, editing, or merging. A personal knowledge base has no real use for graph-editing tools, and they're pure attack surface if this server is ever exposed beyond a private network. `delete_document` is the one exception to "no destructive tools" — deleting a whole document (not individual entities/relations) is common enough to be worth it, but note that on `remote/` it's gated by the same token as everything else (see the security note in [`docs/03-lightrag-mcp-memory.md`](../../docs/03-lightrag-mcp-memory.md), Part 3.8).
 
 ## Tools exposed
 
@@ -23,10 +23,13 @@ Both expose the same read-mostly tool set. Deliberately **not** exposed in eithe
 | `check_health` | Is the LightRAG server up? |
 | `list_documents` | Paginated list of ingested documents + status |
 | `get_status` | Ingestion pipeline counts (pending/processing/processed/failed) |
-| `query_knowledge_base` | Natural-language query (`naive`/`local`/`global`/`hybrid`/`mix`) |
+| `query_knowledge_base` | Natural-language query (`naive`/`local`/`global`/`hybrid`/`mix`) — always searches the *entire* knowledge base, there is no tagging or per-document scoping (LightRAG has none built in; see note below) |
 | `upload_document` | Ingest a file already present on the server's filesystem |
 | `insert_note` | Ingest a text note directly, no file needed |
+| `delete_document` | Permanently remove a document (and its chunks/entities/relations) by `doc_id` — no undo |
 | `scan_for_new_documents` | Re-scan LightRAG's `inputs/` folder |
+
+> **No tags, no per-query filtering.** LightRAG has no concept of labels/tags on documents, and every query mode searches the whole graph — there's no way to scope a query to "just my notes about X". The only real isolation mechanism LightRAG offers is a `workspace`, but that's set per server *instance* (a separate process/port per workspace), not something a single running server or a single query can switch between — too heavy for tagging a handful of notes. If you need hard separation between topics, running two instances (two ports, two `launchd` daemons, two MCP servers pointed at each) is the only supported way.
 
 ## Setup (either version)
 

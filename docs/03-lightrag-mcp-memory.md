@@ -340,6 +340,10 @@ sudo tailscale funnel --bg --https=443 8500
 
 No OAuth client setup is needed on the connector side despite the UI presenting OAuth-client options — the server doesn't implement OAuth at all, and the header-based token is what actually authenticates the connection.
 
+> **Security notes, both accepted trade-offs rather than bugs, worth knowing before relying on this:**
+> - **One token, both read and write.** `insert_note` and `upload_document` are gated by the exact same token as the read-only tools. If `MCP_AUTH_TOKEN` ever leaks, the blast radius isn't "someone can read my notes" — it's "someone can inject arbitrary text into the knowledge base", which later comes back to you as the result of a query. That's a self-inflicted prompt-injection vector, not just a privacy leak. A single 256-bit token generated with `secrets.token_urlsafe(32)` is not practically guessable, so the realistic risk is the token being pasted somewhere public (a shared terminal recording, a chat log, a public gist) — treat it with the same care as a password, and regenerate it (new `MCP_AUTH_TOKEN`, restart the daemon, update the Custom Connector) if you ever suspect it has.
+> - **The token lives in plaintext in `/Library/LaunchDaemons/ai.lightrag.mcp.plist`**, same as `LIGHTRAG_API_KEY` — see the plist-permissions note in [Part 1.6](01-ollama-opencode-tailscale.md#part-16--network-security-checklist). Worth a `chmod 600` on that specific plist given it's now reachable from the public internet, not just the tailnet.
+
 ## Operational notes
 
 - LightRAG's LLM response cache (Part 3.3) survives restarts; wipe it (`storage/kv_store_llm_response_cache.json`, or the whole `storage/` directory) before any timing comparison, not just a content comparison.

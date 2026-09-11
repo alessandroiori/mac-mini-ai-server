@@ -118,6 +118,25 @@ def insert_note(text: str, title: str = "") -> dict:
 
 
 @mcp.tool(
+    description=(
+        "Permanently delete a document from the knowledge base by its doc_id (get it from "
+        "list_documents). Removes the document's chunks, entities, and relations from the "
+        "graph. Set delete_file=True (default) to also remove the copy LightRAG keeps of the "
+        "source; this does not touch the original in ~/ai-memory/raw. There is no undo."
+    )
+)
+def delete_document(doc_id: str, delete_file: bool = True) -> dict:
+    with _client() as c:
+        r = c.request(
+            "DELETE",
+            "/documents/delete_document",
+            json={"doc_ids": [doc_id], "delete_file": delete_file, "delete_llm_cache": False},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool(
     description="Trigger a rescan of LightRAG's inputs folder for files copied there manually but not yet processed."
 )
 def scan_for_new_documents() -> dict:
