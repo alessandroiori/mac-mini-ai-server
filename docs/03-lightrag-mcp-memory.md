@@ -203,6 +203,8 @@ tailscale serve --bg --https=8444 9621
 
 Documents go into `~/ai-memory/raw/` (source of truth) and are copied or uploaded into LightRAG's `inputs/` for processing — via the WebUI, `scp`, or the MCP `upload_document`/`insert_note` tools from Part 3.6.
 
+LightRAG ships its own WebUI on the same port as its REST API — useful for a visual check of what's actually in the knowledge base (documents, processing status, the entity/relation graph) without going through curl or an MCP client at all. Tailnet-only, same address as the API: `https://mini.tail171fd2.ts.net:8444` (swap in your own machine's Tailscale hostname and port). Handy after any write or delete operation from an MCP client, to confirm the change actually landed.
+
 Monitoring commands (all scoped to the current daemon run, per the methodology in Part 3.3):
 
 ```bash
@@ -339,6 +341,8 @@ sudo tailscale funnel --bg --https=443 8500
 3. Request headers → add `x-auth-token` with the server's `MCP_AUTH_TOKEN` as the value.
 
 No OAuth client setup is needed on the connector side despite the UI presenting OAuth-client options — the server doesn't implement OAuth at all, and the header-based token is what actually authenticates the connection.
+
+> **Gotcha: restarting the daemon doesn't refresh an already-open Custom Connector session.** The streamable-http transport keeps a session on first handshake, and Claude's own connector infrastructure appears to reuse that session across a simple tool-list refresh — after adding a new tool to the server and restarting the daemon, a chat that already had a connection open kept seeing the old tool list no matter how many times the connector was refreshed. A conversation-level refresh isn't enough: fully disconnect and reconnect the Custom Connector itself (Settings → Connectors → remove, then re-add with the same URL/header), or simply start a brand-new chat, to force a fresh session against the current server process.
 
 > **Security notes, both accepted trade-offs rather than bugs, worth knowing before relying on this:**
 > - **One token, both read and write.** `insert_note` and `upload_document` are gated by the exact same token as the read-only tools. If `MCP_AUTH_TOKEN` ever leaks, the blast radius isn't "someone can read my notes" — it's "someone can inject arbitrary text into the knowledge base", which later comes back to you as the result of a query. That's a self-inflicted prompt-injection vector, not just a privacy leak. A single 256-bit token generated with `secrets.token_urlsafe(32)` is not practically guessable, so the realistic risk is the token being pasted somewhere public (a shared terminal recording, a chat log, a public gist) — treat it with the same care as a password, and regenerate it (new `MCP_AUTH_TOKEN`, restart the daemon, update the Custom Connector) if you ever suspect it has.
